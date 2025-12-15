@@ -36,12 +36,12 @@ type Manager struct {
 }
 
 // New creates a new process manager
-func New(colorful bool) *Manager {
+func New(startPort int, colorful bool) *Manager {
 	return &Manager{
 		colorful:      colorful,
 		healthPath:    "/",
 		healthTimeout: 30 * time.Second,
-		portCounter:   56700, // 使用高位端口，避免与常用端口冲突
+		portCounter:   startPort,
 	}
 }
 

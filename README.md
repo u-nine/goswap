@@ -50,6 +50,9 @@ cmd = "go build -o ./tmp/main.exe ."
 bin = "./tmp/main.exe"
 delay = 500
 
+[process]
+start_port = 56700
+
 [proxy]
 port = 8080
 
@@ -131,7 +134,7 @@ goswap
 | 组件 | 端口 | 说明 |
 |------|------|------|
 | goswap 代理 | 固定端口（如 8080） | 对外提供服务，前端访问这个端口 |
-| 你的应用 | 动态端口（9000+） | 由 goswap 分配，应用必须读取环境变量 |
+| 你的应用 | 动态端口（56700+） | 由 goswap 分配，应用必须读取环境变量 |
 
 **重要**：goswap 代理的端口不能与应用原本配置的端口相同，否则会端口冲突！
 
@@ -141,8 +144,8 @@ goswap 启动应用时会设置以下环境变量：
 
 | 环境变量 | 示例值 | 说明 |
 |----------|--------|------|
-| `GOSWAP_ADDR` | `127.0.0.1:9001` | 完整监听地址（推荐使用） |
-| `GOSWAP_PORT` | `9001` | 端口号 |
+| `GOSWAP_ADDR` | `127.0.0.1:56701` | 完整监听地址（推荐使用） |
+| `GOSWAP_PORT` | `56701` | 端口号 |
 | `GOSWAP_HOST` | `127.0.0.1` | 主机地址 |
 
 ### 各框架适配示例
@@ -290,6 +293,9 @@ root = "."
 cmd = "go build -o ./tmp/server.exe ./server"
 bin = "./tmp/server.exe"
 delay = 500
+
+[process]
+start_port = 56700
 
 [proxy]
 # 代理端口（前端访问这个端口）

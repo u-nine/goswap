@@ -117,7 +117,7 @@ func (c *Coordinator) init() error {
 	c.proxy = proxy.New(c.cfg.Proxy.Port, c.cfg.Log.Color)
 
 	// Initialize process manager
-	c.procMgr = process.New(c.cfg.Log.Color)
+	c.procMgr = process.New(c.cfg.Process.StartPort, c.cfg.Log.Color)
 
 	// Initialize watcher
 	delay := time.Duration(c.cfg.Build.Delay) * time.Millisecond

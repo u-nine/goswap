@@ -1,23 +1,21 @@
-# 项目根目录
-root = "."
+root = '.'
 
-# 编译配置
 [build]
-cmd = "go build -o ./tmp/demo.exe ."
-bin = "./tmp/demo.exe"
+cmd = 'go build -o ./tmp/main.exe .'
+bin = './tmp/main.exe'
 delay = 500
 
-# 代理配置  
+[process]
+start_port = 56700
+
 [proxy]
 port = 8089
 
-# 监听配置
 [watch]
-include = ["./"]
-exclude = ["vendor", ".git", "tmp"]
-extensions = ["go"]
+include = ['./']
+exclude = ['vendor', '.git', 'tmp', 'node_modules']
+extensions = ['go', 'html', 'tmpl']
 
-# 日志配置
 [log]
-level = "info"
+level = 'info'
 color = true

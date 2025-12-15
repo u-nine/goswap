@@ -9,11 +9,12 @@ import (
 
 // Config represents the main configuration structure
 type Config struct {
-	Root  string      `toml:"root"`
-	Build BuildConfig `toml:"build"`
-	Proxy ProxyConfig `toml:"proxy"`
-	Watch WatchConfig `toml:"watch"`
-	Log   LogConfig   `toml:"log"`
+	Root    string        `toml:"root"`
+	Build   BuildConfig   `toml:"build"`
+	Process ProcessConfig `toml:"process"`
+	Proxy   ProxyConfig   `toml:"proxy"`
+	Watch   WatchConfig   `toml:"watch"`
+	Log     LogConfig     `toml:"log"`
 }
 
 // BuildConfig contains build-related settings
@@ -21,6 +22,11 @@ type BuildConfig struct {
 	Cmd   string `toml:"cmd"`
 	Bin   string `toml:"bin"`
 	Delay int    `toml:"delay"` // milliseconds
+}
+
+// ProcessConfig contains process management settings
+type ProcessConfig struct {
+	StartPort int `toml:"start_port"`
 }
 
 // ProxyConfig contains proxy server settings
@@ -49,6 +55,9 @@ func DefaultConfig() *Config {
 			Cmd:   "go build -o ./tmp/main.exe .",
 			Bin:   "./tmp/main.exe",
 			Delay: 500,
+		},
+		Process: ProcessConfig{
+			StartPort: 56700,
 		},
 		Proxy: ProxyConfig{
 			Port: 8080,
