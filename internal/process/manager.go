@@ -61,13 +61,13 @@ func (m *Manager) Start(ctx context.Context, binary string) (*Process, error) {
 
 	m.log("info", "Starting new process on port %d...", port)
 
-	// Create the command with PORT and HOST environment variables
+	// Create the command with GOSWAP_PORT and GOSWAP_HOST environment variables
 	// Using 127.0.0.1 to avoid Windows firewall prompts
 	cmd := exec.CommandContext(ctx, binary)
 	cmd.Env = append(os.Environ(),
-		fmt.Sprintf("PORT=%d", port),
-		"HOST=127.0.0.1",
-		fmt.Sprintf("ADDR=127.0.0.1:%d", port),
+		fmt.Sprintf("GOSWAP_PORT=%d", port),
+		"GOSWAP_HOST=127.0.0.1",
+		fmt.Sprintf("GOSWAP_ADDR=127.0.0.1:%d", port),
 	)
 	cmd.Stdout = &prefixWriter{prefix: "[APP] ", colorful: m.colorful}
 	cmd.Stderr = &prefixWriter{prefix: "[APP] ", colorful: m.colorful, isError: true}
@@ -86,18 +86,21 @@ func (m *Manager) Start(ctx context.Context, binary string) (*Process, error) {
 
 	// Wait for the process to be ready
 	if err := m.waitForReady(ctx, proc); err != nil {
-		// Health check timeout is no longer fatal - just log a warning
-		// The process may still be functional, just without a health endpoint
-		if err.Error() != "process exited unexpectedly" && ctx.Err() == nil {
-			m.log("warn", "Health check did not pass: %v (process will continue)", err)
-			// Still mark as ready and continue - the process might work without health endpoint
-			proc.Ready = true
-			m.log("info", "Process started on port %d (health check skipped)", port)
-			return proc, nil
+		// Check if process actually exited
+		if proc.Cmd.ProcessState != nil {
+			cmd.Process.Kill()
+			return nil, fmt.Errorf("process exited unexpectedly during startup")
 		}
-		// Only kill and return error if process actually exited or context was cancelled
-		cmd.Process.Kill()
-		return nil, fmt.Errorf("process failed to become ready: %w", err)
+		// Check if context was cancelled
+		if ctx.Err() != nil {
+			cmd.Process.Kill()
+			return nil, fmt.Errorf("startup cancelled: %w", ctx.Err())
+		}
+		// Health check timeout - just log a warning and continue
+		m.log("warn", "Health check did not pass: %v", err)
+		m.log("info", "Process started on port %d (health check skipped, process continues running)", port)
+		proc.Ready = true
+		return proc, nil
 	}
 
 	proc.Ready = true
