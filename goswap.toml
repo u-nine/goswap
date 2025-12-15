@@ -1,0 +1,32 @@
+# 项目根目录
+root = "."
+
+# 编译配置
+[build]
+# 编译命令
+cmd = "go build -o ./tmp/main.exe ."
+# 编译输出文件
+bin = "./tmp/main.exe"
+# 编译前延迟（毫秒），用于去抖动
+delay = 500
+
+# 代理配置  
+[proxy]
+# 对外暴露端口
+port = 8089
+
+# 监听配置
+[watch]
+# 监听的目录
+include = ["./"]
+# 排除的目录
+exclude = ["vendor", ".git", "tmp", "node_modules"]
+# 监听的文件扩展名
+extensions = ["go", "html", "tmpl"]
+
+# 日志配置
+[log]
+# 日志级别: debug, info, warn, error
+level = "info"
+# 是否启用彩色输出
+color = true
