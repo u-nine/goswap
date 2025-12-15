@@ -86,7 +86,16 @@ func (m *Manager) Start(ctx context.Context, binary string) (*Process, error) {
 
 	// Wait for the process to be ready
 	if err := m.waitForReady(ctx, proc); err != nil {
-		// Kill the process if it didn't become ready
+		// Health check timeout is no longer fatal - just log a warning
+		// The process may still be functional, just without a health endpoint
+		if err.Error() != "process exited unexpectedly" && ctx.Err() == nil {
+			m.log("warn", "Health check did not pass: %v (process will continue)", err)
+			// Still mark as ready and continue - the process might work without health endpoint
+			proc.Ready = true
+			m.log("info", "Process started on port %d (health check skipped)", port)
+			return proc, nil
+		}
+		// Only kill and return error if process actually exited or context was cancelled
 		cmd.Process.Kill()
 		return nil, fmt.Errorf("process failed to become ready: %w", err)
 	}

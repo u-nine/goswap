@@ -46,7 +46,7 @@ func main() {
 
 	// Print banner
 	color.Cyan(banner)
-	color.Green("  Zero-downtime hot reload for Gin applications")
+	color.Green("  Zero-downtime hot reload for Go applications")
 	color.White("  Version: %s\n\n", version)
 
 	// Initialize config file
