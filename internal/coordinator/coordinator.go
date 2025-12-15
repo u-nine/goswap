@@ -27,6 +27,8 @@ type Coordinator struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	buildTrigger chan struct{}
 }
 
 // New creates a new coordinator
@@ -34,9 +36,10 @@ func New(cfg *config.Config) *Coordinator {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Coordinator{
-		cfg:    cfg,
-		ctx:    ctx,
-		cancel: cancel,
+		cfg:          cfg,
+		ctx:          ctx,
+		cancel:       cancel,
+		buildTrigger: make(chan struct{}, 1),
 	}
 }
 
@@ -80,6 +83,9 @@ func (c *Coordinator) Run() error {
 			c.log("error", "Proxy server error: %v", err)
 		}
 	}()
+
+	// Start build loop
+	go c.buildLoop()
 
 	c.log("success", "go-swap is running!")
 	c.log("info", "Listening on http://localhost:%d", c.cfg.Proxy.Port)
@@ -137,9 +143,52 @@ func (c *Coordinator) init() error {
 }
 
 // onFileChange handles file change events
-func (c *Coordinator) onFileChange(event watcher.Event) {
-	c.log("info", "File changed: %s", event.Path)
+func (c *Coordinator) onFileChange(events []watcher.Event) {
+	if len(events) == 0 {
+		return
+	}
+	c.log("info", "Detected changes in %d files", len(events))
+	for _, e := range events {
+		c.log("info", "  - %s", e.Path)
+	}
 
+	// Trigger build
+	select {
+	case c.buildTrigger <- struct{}{}:
+	default:
+		// Already triggered
+	}
+}
+
+// buildLoop handles the serialized build process
+func (c *Coordinator) buildLoop() {
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-c.buildTrigger:
+			// Drain any pending triggers that arrived while we were waiting?
+			// No, the channel has buffer 1, so at most one pending.
+			// But we want to ensure we clear it so we don't build twice if one came fast?
+			// The logic:
+			// 1. We got a trigger.
+			// 2. Perform build.
+			// 3. Loop back.
+			// If a new trigger arrived DURING build, it will be in the channel.
+			// Next loop will pick it up and rebuild. This is correct behavior.
+			// If 10 triggers arrived, channel buffer 1 + 1 blocked sender?
+			// onFileChange: select case default -> drops if full.
+			// So if we are building, and 5 triggers come:
+			// 1st fills channel. 2nd-5th drop.
+			// After build finishes, we pick up the one in channel => Rebuild once.
+			// This is PERFECT coalescing.
+
+			c.rebuild()
+		}
+	}
+}
+
+func (c *Coordinator) rebuild() {
 	// Build new version
 	result := c.builder.Build(c.ctx)
 	if result.Status != builder.StatusSuccess {
@@ -174,6 +223,19 @@ func (c *Coordinator) onFileChange(event watcher.Event) {
 			// Wait a bit for in-flight requests to complete
 			time.Sleep(2 * time.Second)
 			c.procMgr.Stop(oldProc, 10*time.Second)
+
+			// Cleanup old binary
+			if oldProc.Binary != "" {
+				// Retry a few times in case of Windows file locking
+				for i := 0; i < 5; i++ {
+					err := os.Remove(oldProc.Binary)
+					if err == nil || os.IsNotExist(err) {
+						c.log("info", "Cleaned up old binary: %s", filepath.Base(oldProc.Binary))
+						break
+					}
+					time.Sleep(500 * time.Millisecond)
+				}
+			}
 		}()
 	}
 
@@ -197,6 +259,10 @@ func (c *Coordinator) waitForShutdown() {
 	// Stop current process
 	if proc := c.procMgr.Current(); proc != nil {
 		c.procMgr.Stop(proc, 10*time.Second)
+		// Cleanup binary on shutdown
+		if proc.Binary != "" {
+			os.Remove(proc.Binary)
+		}
 	}
 
 	c.log("info", "Goodbye!")

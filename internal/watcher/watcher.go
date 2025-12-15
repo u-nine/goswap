@@ -1,6 +1,9 @@
 package watcher
 
 import (
+	"crypto/md5"
+	"encoding/hex"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,16 +26,16 @@ type Watcher struct {
 	extensions []string
 	excludes   []string
 	delay      time.Duration
-	onChange   func(Event)
+	onChange   func([]Event)
 
 	fsWatcher *fsnotify.Watcher
 	done      chan struct{}
 	mu        sync.Mutex
-	lastEvent time.Time
+	hashes    map[string]string
 }
 
 // New creates a new file watcher
-func New(root string, extensions, excludes []string, delay time.Duration, onChange func(Event)) (*Watcher, error) {
+func New(root string, extensions, excludes []string, delay time.Duration, onChange func([]Event)) (*Watcher, error) {
 	fsWatcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
@@ -46,6 +49,7 @@ func New(root string, extensions, excludes []string, delay time.Duration, onChan
 		onChange:   onChange,
 		fsWatcher:  fsWatcher,
 		done:       make(chan struct{}),
+		hashes:     make(map[string]string),
 	}
 
 	return w, nil
@@ -85,6 +89,16 @@ func (w *Watcher) addDirs() error {
 			return w.fsWatcher.Add(path)
 		}
 
+		// Calculate initial hash for files
+		if !info.IsDir() && w.hasValidExtension(path) {
+			hash, err := w.calculateHash(path)
+			if err == nil {
+				w.mu.Lock()
+				w.hashes[path] = hash
+				w.mu.Unlock()
+			}
+		}
+
 		return nil
 	})
 }
@@ -122,11 +136,18 @@ func (w *Watcher) hasValidExtension(path string) bool {
 // loop handles file system events
 func (w *Watcher) loop() {
 	var (
-		timer    *time.Timer
-		lastPath string
+		timer         *time.Timer
+		pendingEvents []Event
+		pendingPaths  = make(map[string]bool)
+		timerActive   bool
 	)
 
 	for {
+		var timerC <-chan time.Time
+		if timerActive && timer != nil {
+			timerC = timer.C
+		}
+
 		select {
 		case <-w.done:
 			if timer != nil {
@@ -146,7 +167,9 @@ func (w *Watcher) loop() {
 
 			// Check if it's a relevant file
 			info, err := os.Stat(event.Name)
-			if err == nil && info.IsDir() {
+			isDir := err == nil && info.IsDir()
+
+			if isDir {
 				// New directory created, watch it
 				if event.Op&fsnotify.Create == fsnotify.Create {
 					w.fsWatcher.Add(event.Name)
@@ -158,21 +181,59 @@ func (w *Watcher) loop() {
 				continue
 			}
 
-			// Debounce: reset timer on each event
-			lastPath = event.Name
-			if timer != nil {
-				timer.Stop()
-			}
-			timer = time.AfterFunc(w.delay, func() {
+			// Check content hash
+			// For writes, check if content actually changed
+			if event.Op&fsnotify.Write == fsnotify.Write {
+				newHash, err := w.calculateHash(event.Name)
+				if err != nil {
+					// If error (e.g. file deleted quickly), treat as change
+				} else {
+					w.mu.Lock()
+					oldHash, exists := w.hashes[event.Name]
+					if exists && oldHash == newHash {
+						w.mu.Unlock()
+						continue // Content didn't change
+					}
+					w.hashes[event.Name] = newHash
+					w.mu.Unlock()
+				}
+			} else if event.Op&fsnotify.Create == fsnotify.Create {
+				newHash, err := w.calculateHash(event.Name)
+				if err == nil {
+					w.mu.Lock()
+					w.hashes[event.Name] = newHash
+					w.mu.Unlock()
+				}
+			} else if event.Op&fsnotify.Remove == fsnotify.Remove || event.Op&fsnotify.Rename == fsnotify.Rename {
 				w.mu.Lock()
-				defer w.mu.Unlock()
+				delete(w.hashes, event.Name)
+				w.mu.Unlock()
+			}
 
-				w.onChange(Event{
-					Path: lastPath,
+			// Add to pending events
+			if !pendingPaths[event.Name] {
+				pendingEvents = append(pendingEvents, Event{
+					Path: event.Name,
 					Op:   event.Op,
 					Time: time.Now(),
 				})
-			})
+				pendingPaths[event.Name] = true
+			}
+
+			// Reset timer
+			if timer != nil {
+				timer.Stop()
+			}
+			timer = time.NewTimer(w.delay)
+			timerActive = true
+
+		case <-timerC:
+			timerActive = false
+			if len(pendingEvents) > 0 {
+				w.onChange(pendingEvents)
+				pendingEvents = nil
+				pendingPaths = make(map[string]bool)
+			}
 
 		case err, ok := <-w.fsWatcher.Errors:
 			if !ok {
@@ -182,4 +243,19 @@ func (w *Watcher) loop() {
 			_ = err
 		}
 	}
+}
+
+// calculateHash computes the MD5 hash of a file
+func (w *Watcher) calculateHash(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := md5.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }

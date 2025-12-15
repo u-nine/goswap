@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/fatih/color"
@@ -117,10 +116,12 @@ func (m *Manager) Stop(proc *Process, timeout time.Duration) error {
 
 	m.log("info", "Gracefully stopping process on port %d...", proc.Port)
 
-	// Send SIGTERM for graceful shutdown
-	if err := proc.Cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		// Process might already be dead
-		return nil
+	// Send os.Interrupt for graceful shutdown (works on Windows too)
+	// On Windows, os.Process.Signal(os.Interrupt) is not implemented.
+	// We catch the error and force kill immediately to avoid waiting for timeout.
+	if err := proc.Cmd.Process.Signal(os.Interrupt); err != nil {
+		m.log("warn", "Graceful shutdown not supported (error: %v), force killing...", err)
+		return proc.Cmd.Process.Kill()
 	}
 
 	// Wait for the process to exit with timeout
