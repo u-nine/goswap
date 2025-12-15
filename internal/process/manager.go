@@ -41,7 +41,7 @@ func New(colorful bool) *Manager {
 		colorful:      colorful,
 		healthPath:    "/",
 		healthTimeout: 30 * time.Second,
-		portCounter:   9000,
+		portCounter:   56700, // 使用高位端口，避免与常用端口冲突
 	}
 }
 
