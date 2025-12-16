@@ -8,7 +8,7 @@
 ## ✨ 特性
 
 - 🔥 **零停机热重载** - 编译期间老服务继续运行，无请求丢失
-- 👀 **文件监听** - 自动检测代码变更并重新编译
+- ⌨️ **手动控制** - 通过命令行指令控制重新编译，精确掌控重载时机
 - 🔄 **无缝切换** - 新服务就绪后自动替换老服务
 - 🎨 **彩色日志** - 清晰的状态输出
 - ⚙️ **灵活配置** - TOML 格式配置文件
@@ -57,6 +57,7 @@ start_port = 56700
 port = 8080
 
 [watch]
+# 注意：当前版本不再使用文件监听，这些配置保留用于未来扩展
 include = ["./"]
 exclude = ["vendor", ".git", "tmp"]
 extensions = ["go", "html", "tmpl"]
@@ -99,7 +100,33 @@ func main() {
 goswap
 ```
 
-现在访问 `http://localhost:8080`，修改代码后会自动重新编译并无缝切换！
+现在访问 `http://localhost:8080`，程序启动后会显示可用命令。
+
+### 5. 手动触发重新编译
+
+修改代码后，在 goswap 运行的终端中输入以下命令来触发重新编译：
+
+- `rebuild` 或 `r` - 重新编译并热重载应用
+- `quit` 或 `q` - 退出 goswap
+
+示例：
+
+```bash
+$ goswap
+[15:04:05] [SWAP] Starting go-swap...
+[15:04:05] [SWAP] Performing initial build...
+[15:04:06] [SWAP] go-swap is running!
+[15:04:06] [SWAP] Listening on http://localhost:8080
+[15:04:06] [SWAP] Commands:
+[15:04:06] [SWAP]   rebuild, r - Rebuild and reload the application
+[15:04:06] [SWAP]   quit, q   - Stop go-swap
+[15:04:06] [SWAP] Press Ctrl+C to stop
+
+# 修改代码后，输入以下命令触发重新编译：
+rebuild
+[15:05:10] [SWAP] Manual rebuild triggered
+[15:05:11] [SWAP] Hot reload completed!
+```
 
 ## 🔧 工作原理
 
@@ -119,7 +146,7 @@ goswap
 +------------------+
 ```
 
-1. **文件变更** → 文件监听器检测到变更
+1. **用户输入命令** → 在终端输入 `rebuild` 或 `r` 触发重新编译
 2. **后台编译** → 老服务继续运行，编译新版本
 3. **启动新服务** → 新服务在新端口启动并健康检查
 4. **无缝切换** → 代理切换到新服务
@@ -303,6 +330,7 @@ start_port = 56700
 port = 8080
 
 [watch]
+# 注意：当前版本不再使用文件监听，这些配置保留用于未来扩展
 include = ["./"]
 exclude = ["vendor", ".git", "tmp", "node_modules", "web"]
 extensions = ["go", "html", "tmpl", "yaml", "yml"]
@@ -318,7 +346,6 @@ color = true
 - [ ] goswap 代理端口与应用原端口不冲突
 - [ ] 前端 API 请求地址改为 goswap 代理端口
 - [ ] `goswap.toml` 中的 `build.cmd` 正确配置了编译命令
-- [ ] `watch.exclude` 排除了不需要监听的目录（如 `node_modules`、`web`）
 
 ## 📁 命令行参数
 
@@ -327,6 +354,34 @@ color = true
 | `-c` | 配置文件路径 | `goswap.toml` |
 | `-v` | 显示版本 | - |
 | `-init` | 创建默认配置文件 | - |
+
+## ⌨️ 交互式命令
+
+goswap 启动后，支持以下交互式命令：
+
+| 命令 | 简写 | 说明 |
+|------|------|------|
+| `rebuild` | `r` | 触发重新编译并热重载应用 |
+| `quit` | `q` | 退出 goswap 程序 |
+
+**使用示例**：
+
+```bash
+# 启动 goswap
+$ goswap
+
+# 修改代码后，在终端输入：
+rebuild
+# 或简写：
+r
+
+# 退出程序：
+quit
+# 或简写：
+q
+```
+
+**提示**：也可以使用 `Ctrl+C` 来退出程序。
 
 ## ❓ 常见问题
 
@@ -347,6 +402,10 @@ goswap 默认会检查应用是否正常启动。如果应用没有 `/` 路径�
 ### Windows 防火墙弹窗
 
 使用 `127.0.0.1` 作为监听地址（而不是 `0.0.0.0` 或 `:`）可以避免 Windows 防火墙弹窗。goswap 会自动设置 `GOSWAP_HOST=127.0.0.1`。
+
+### 如何触发重新编译？
+
+goswap 不再自动检测文件变更。修改代码后，需要在 goswap 运行的终端中输入 `rebuild` 或 `r` 命令来触发重新编译。这样可以让你精确控制重载时机，避免频繁的自动编译。
 
 ## 📄 License
 

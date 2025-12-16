@@ -1,11 +1,13 @@
 package coordinator
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -13,7 +15,6 @@ import (
 	"github.com/u-nine/goswap/internal/builder"
 	"github.com/u-nine/goswap/internal/process"
 	"github.com/u-nine/goswap/internal/proxy"
-	"github.com/u-nine/goswap/internal/watcher"
 	"github.com/u-nine/goswap/pkg/config"
 )
 
@@ -23,7 +24,6 @@ type Coordinator struct {
 	builder *builder.Builder
 	proxy   *proxy.Proxy
 	procMgr *process.Manager
-	watcher *watcher.Watcher
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -75,11 +75,6 @@ func (c *Coordinator) Run() error {
 		return fmt.Errorf("failed to set proxy upstream: %w", err)
 	}
 
-	// Start file watcher
-	if err := c.watcher.Start(); err != nil {
-		return fmt.Errorf("failed to start watcher: %w", err)
-	}
-
 	// Start proxy server in a goroutine
 	go func() {
 		if err := c.proxy.Start(c.ctx); err != nil {
@@ -90,8 +85,14 @@ func (c *Coordinator) Run() error {
 	// Start build loop
 	go c.buildLoop()
 
+	// Start command input handler
+	go c.commandLoop()
+
 	c.log("success", "go-swap is running!")
 	c.log("info", "Listening on http://localhost:%d", c.cfg.Proxy.Port)
+	c.log("info", "Commands:")
+	c.log("info", "  rebuild, r - Rebuild and reload the application")
+	c.log("info", "  quit, q   - Stop go-swap")
 	c.log("info", "Press Ctrl+C to stop")
 
 	// Wait for interrupt signal
@@ -128,38 +129,64 @@ func (c *Coordinator) init() error {
 	// Initialize process manager
 	c.procMgr = process.New(c.cfg.Process.StartPort, c.cfg.Log.Color)
 
-	// Initialize watcher
-	delay := time.Duration(c.cfg.Build.Delay) * time.Millisecond
-	w, err := watcher.New(
-		c.cfg.Root,
-		c.cfg.Watch.Extensions,
-		c.cfg.Watch.Exclude,
-		delay,
-		c.onFileChange,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create watcher: %w", err)
-	}
-	c.watcher = w
-
 	return nil
 }
 
-// onFileChange handles file change events
-func (c *Coordinator) onFileChange(events []watcher.Event) {
-	if len(events) == 0 {
-		return
-	}
-	c.log("info", "Detected changes in %d files", len(events))
-	for _, e := range events {
-		c.log("info", "  - %s", e.Path)
-	}
+// commandLoop handles user command input
+func (c *Coordinator) commandLoop() {
+	scanner := bufio.NewScanner(os.Stdin)
 
-	// Trigger build
-	select {
-	case c.buildTrigger <- struct{}{}:
-	default:
-		// Already triggered
+	// Use a channel to handle input in a non-blocking way
+	inputChan := make(chan string, 1)
+
+	// Read input in a separate goroutine
+	go func() {
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line != "" {
+				select {
+				case inputChan <- line:
+				case <-c.ctx.Done():
+					return
+				}
+			}
+		}
+		close(inputChan)
+	}()
+
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case line, ok := <-inputChan:
+			if !ok {
+				// Channel closed, exit
+				return
+			}
+
+			// Parse command
+			parts := strings.Fields(line)
+			if len(parts) == 0 {
+				continue
+			}
+
+			cmd := strings.ToLower(parts[0])
+			switch cmd {
+			case "rebuild", "r":
+				c.log("info", "Manual rebuild triggered")
+				select {
+				case c.buildTrigger <- struct{}{}:
+				default:
+					// Already triggered
+				}
+			case "quit", "q", "exit":
+				c.log("info", "Shutting down...")
+				c.cancel()
+				return
+			default:
+				c.log("info", "Unknown command: %s. Use 'rebuild' or 'r' to rebuild, 'quit' or 'q' to exit", cmd)
+			}
+		}
 	}
 }
 
@@ -170,21 +197,10 @@ func (c *Coordinator) buildLoop() {
 		case <-c.ctx.Done():
 			return
 		case <-c.buildTrigger:
-			// Drain any pending triggers that arrived while we were waiting?
-			// No, the channel has buffer 1, so at most one pending.
-			// But we want to ensure we clear it so we don't build twice if one came fast?
-			// The logic:
-			// 1. We got a trigger.
-			// 2. Perform build.
-			// 3. Loop back.
-			// If a new trigger arrived DURING build, it will be in the channel.
-			// Next loop will pick it up and rebuild. This is correct behavior.
-			// If 10 triggers arrived, channel buffer 1 + 1 blocked sender?
-			// onFileChange: select case default -> drops if full.
-			// So if we are building, and 5 triggers come:
-			// 1st fills channel. 2nd-5th drop.
-			// After build finishes, we pick up the one in channel => Rebuild once.
-			// This is PERFECT coalescing.
+			// The channel has buffer 1, so at most one pending trigger.
+			// If a new trigger arrives during build, it will be in the channel.
+			// Next loop will pick it up and rebuild. This provides coalescing.
+			// If multiple triggers arrive while building, only one will be queued.
 
 			c.rebuild()
 		}
@@ -246,9 +262,6 @@ func (c *Coordinator) waitForShutdown() {
 
 	// Cancel context to stop all components
 	c.cancel()
-
-	// Stop watcher
-	c.watcher.Stop()
 
 	// Stop current process
 	if proc := c.procMgr.Current(); proc != nil {
