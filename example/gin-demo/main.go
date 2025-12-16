@@ -32,8 +32,8 @@ func main() {
 	// Example API endpoint
 	r.GET("/", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
-			"message": "Hello from Gin (Reloaded)!",
-			"version": "1.0.0",
+			"message": "Hello from Gin!",
+			"version": "1.0.1",
 		})
 	})
 

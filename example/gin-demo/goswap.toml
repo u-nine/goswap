@@ -6,10 +6,10 @@ bin = './tmp/main.exe'
 delay = 500
 
 [process]
-start_port = 56700
+start_port = 55700
 
 [proxy]
-port = 8089
+port = 8099
 
 [watch]
 include = ['./']

@@ -60,6 +60,9 @@ func (c *Coordinator) Run() error {
 		return fmt.Errorf("initial build failed: %v", result.Error)
 	}
 
+	// Clean up any stale binaries from previous runs, but keep the one we just built
+	c.cleanupBinaries(c.builder.Binary())
+
 	// Start initial process
 	proc, err := c.procMgr.Start(c.ctx, c.builder.Binary())
 	if err != nil {
@@ -224,18 +227,9 @@ func (c *Coordinator) rebuild() {
 			time.Sleep(2 * time.Second)
 			c.procMgr.Stop(oldProc, 10*time.Second)
 
-			// Cleanup old binary
-			if oldProc.Binary != "" {
-				// Retry a few times in case of Windows file locking
-				for i := 0; i < 5; i++ {
-					err := os.Remove(oldProc.Binary)
-					if err == nil || os.IsNotExist(err) {
-						c.log("info", "Cleaned up old binary: %s", filepath.Base(oldProc.Binary))
-						break
-					}
-					time.Sleep(500 * time.Millisecond)
-				}
-			}
+			// Clean up all old binaries except the current one
+			// This handles the case where previous deletions failed due to file locking
+			c.cleanupBinaries(newProc.Binary)
 		}()
 	}
 
@@ -264,8 +258,62 @@ func (c *Coordinator) waitForShutdown() {
 			os.Remove(proc.Binary)
 		}
 	}
+	// Final cleanup
+	c.cleanupBinaries("")
 
 	c.log("info", "Goodbye!")
+}
+
+// cleanupBinaries removes all executable files in the output directory
+// except the one specified by keepBinary
+func (c *Coordinator) cleanupBinaries(keepBinary string) {
+	// Determine the directory to clean
+	// We use the configured binary path template to find the directory
+	binTemplate := c.cfg.Build.Bin
+	if !filepath.IsAbs(binTemplate) {
+		binTemplate = filepath.Join(c.cfg.Root, binTemplate)
+	}
+	dir := filepath.Dir(binTemplate)
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		c.log("warn", "Failed to read directory for cleanup: %v", err)
+		return
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		// Check if it's an executable file (simple check by extension for Windows)
+		ext := filepath.Ext(entry.Name())
+		if ext != ".exe" {
+			continue
+		}
+
+		fullPath := filepath.Join(dir, entry.Name())
+
+		// Skip the one we want to keep
+		if fullPath == keepBinary {
+			continue
+		}
+
+		// Attempt to delete
+		err := os.Remove(fullPath)
+		if err != nil {
+			// Just log debug/warn, don't fail. It might be locked, we'll get it next time.
+			// Only log if it's not "file not found" (race condition)
+			if !os.IsNotExist(err) {
+				// To avoid spamming, we could only log if it's NOT a "file used by another process" error,
+				// but distinguishing that platform-independently is tricky.
+				// For now, let's just log it if we can't delete it.
+				// c.log("warn", "Failed to cleanup old binary %s: %v", entry.Name(), err)
+			}
+		} else {
+			c.log("info", "Cleaned up stale binary: %s", entry.Name())
+		}
+	}
 }
 
 // log prints a formatted log message
