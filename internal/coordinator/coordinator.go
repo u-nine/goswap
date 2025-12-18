@@ -15,6 +15,7 @@ import (
 	"github.com/u-nine/goswap/internal/builder"
 	"github.com/u-nine/goswap/internal/process"
 	"github.com/u-nine/goswap/internal/proxy"
+	"github.com/u-nine/goswap/internal/watcher"
 	"github.com/u-nine/goswap/pkg/config"
 )
 
@@ -24,6 +25,7 @@ type Coordinator struct {
 	builder *builder.Builder
 	proxy   *proxy.Proxy
 	procMgr *process.Manager
+	watcher *watcher.Watcher
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -75,6 +77,11 @@ func (c *Coordinator) Run() error {
 		return fmt.Errorf("failed to set proxy upstream: %w", err)
 	}
 
+	// Start file watcher
+	if err := c.watcher.Start(); err != nil {
+		return fmt.Errorf("failed to start watcher: %w", err)
+	}
+
 	// Start proxy server in a goroutine
 	go func() {
 		if err := c.proxy.Start(c.ctx); err != nil {
@@ -85,15 +92,16 @@ func (c *Coordinator) Run() error {
 	// Start build loop
 	go c.buildLoop()
 
-	// Start command input handler
-	go c.commandLoop()
-
 	c.log("success", "go-swap is running!")
 	c.log("info", "Listening on http://localhost:%d", c.cfg.Proxy.Port)
-	c.log("info", "Commands:")
-	c.log("info", "  rebuild, r - Rebuild and reload the application")
-	c.log("info", "  quit, q   - Stop go-swap")
 	c.log("info", "Press Ctrl+C to stop")
+	c.log("info", "Type 'rebuild' or 'r' and press Enter to trigger rebuild")
+
+	// Start command line input handler
+	go c.handleCommandInput()
+
+	// Start signal handler for manual rebuild (SIGHUP and file-based)
+	go c.handleRebuildSignal()
 
 	// Wait for interrupt signal
 	c.waitForShutdown()
@@ -129,65 +137,35 @@ func (c *Coordinator) init() error {
 	// Initialize process manager
 	c.procMgr = process.New(c.cfg.Process.StartPort, c.cfg.Log.Color)
 
+	// Initialize watcher
+	delay := time.Duration(c.cfg.Build.Delay) * time.Millisecond
+	w, err := watcher.New(
+		c.cfg.Root,
+		c.cfg.Watch.Extensions,
+		c.cfg.Watch.Exclude,
+		delay,
+		c.onFileChange,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create watcher: %w", err)
+	}
+	c.watcher = w
+
 	return nil
 }
 
-// commandLoop handles user command input
-func (c *Coordinator) commandLoop() {
-	scanner := bufio.NewScanner(os.Stdin)
-
-	// Use a channel to handle input in a non-blocking way
-	inputChan := make(chan string, 1)
-
-	// Read input in a separate goroutine
-	go func() {
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line != "" {
-				select {
-				case inputChan <- line:
-				case <-c.ctx.Done():
-					return
-				}
-			}
-		}
-		close(inputChan)
-	}()
-
-	for {
-		select {
-		case <-c.ctx.Done():
-			return
-		case line, ok := <-inputChan:
-			if !ok {
-				// Channel closed, exit
-				return
-			}
-
-			// Parse command
-			parts := strings.Fields(line)
-			if len(parts) == 0 {
-				continue
-			}
-
-			cmd := strings.ToLower(parts[0])
-			switch cmd {
-			case "rebuild", "r":
-				c.log("info", "Manual rebuild triggered")
-				select {
-				case c.buildTrigger <- struct{}{}:
-				default:
-					// Already triggered
-				}
-			case "quit", "q", "exit":
-				c.log("info", "Shutting down...")
-				c.cancel()
-				return
-			default:
-				c.log("info", "Unknown command: %s. Use 'rebuild' or 'r' to rebuild, 'quit' or 'q' to exit", cmd)
-			}
-		}
+// onFileChange handles file change events
+// Note: File changes no longer trigger automatic rebuilds.
+// Users must manually trigger rebuilds via signal (SIGHUP on Unix).
+func (c *Coordinator) onFileChange(events []watcher.Event) {
+	if len(events) == 0 {
+		return
 	}
+	c.log("info", "Detected changes in %d files", len(events))
+	for _, e := range events {
+		c.log("info", "  - %s", e.Path)
+	}
+	c.log("info", "Files changed. Type 'rebuild' or 'r' and press Enter to trigger rebuild")
 }
 
 // buildLoop handles the serialized build process
@@ -197,10 +175,21 @@ func (c *Coordinator) buildLoop() {
 		case <-c.ctx.Done():
 			return
 		case <-c.buildTrigger:
-			// The channel has buffer 1, so at most one pending trigger.
-			// If a new trigger arrives during build, it will be in the channel.
-			// Next loop will pick it up and rebuild. This provides coalescing.
-			// If multiple triggers arrive while building, only one will be queued.
+			// Drain any pending triggers that arrived while we were waiting?
+			// No, the channel has buffer 1, so at most one pending.
+			// But we want to ensure we clear it so we don't build twice if one came fast?
+			// The logic:
+			// 1. We got a trigger.
+			// 2. Perform build.
+			// 3. Loop back.
+			// If a new trigger arrived DURING build, it will be in the channel.
+			// Next loop will pick it up and rebuild. This is correct behavior.
+			// If 10 triggers arrived, channel buffer 1 + 1 blocked sender?
+			// onFileChange: select case default -> drops if full.
+			// So if we are building, and 5 triggers come:
+			// 1st fills channel. 2nd-5th drop.
+			// After build finishes, we pick up the one in channel => Rebuild once.
+			// This is PERFECT coalescing.
 
 			c.rebuild()
 		}
@@ -208,10 +197,32 @@ func (c *Coordinator) buildLoop() {
 }
 
 func (c *Coordinator) rebuild() {
+	c.log("info", "Starting rebuild...")
+
 	// Build new version
 	result := c.builder.Build(c.ctx)
 	if result.Status != builder.StatusSuccess {
-		c.log("error", "Build failed, keeping current version")
+		c.log("error", "Rebuild failed, keeping current version running")
+
+		// Output detailed failure reason
+		if result.Error != nil {
+			c.log("error", "Build error: %v", result.Error)
+		}
+
+		// Output build output (contains compiler errors/warnings)
+		// Builder already logs this, but we also log it here for clarity at coordinator level
+		if result.Output != "" {
+			c.log("error", "Compilation errors:")
+			lines := strings.Split(strings.TrimSpace(result.Output), "\n")
+			for _, line := range lines {
+				trimmed := strings.TrimSpace(line)
+				if trimmed != "" {
+					c.log("error", "  %s", trimmed)
+				}
+			}
+		}
+
+		c.log("info", "Old service continues running. Please fix the errors above and try again")
 		return
 	}
 
@@ -252,6 +263,86 @@ func (c *Coordinator) rebuild() {
 	c.log("success", "Hot reload completed!")
 }
 
+// handleCommandInput listens for command line input to trigger rebuild
+func (c *Coordinator) handleCommandInput() {
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		line = strings.ToLower(line)
+
+		if line == "rebuild" || line == "r" {
+			c.log("info", "Rebuild command received, triggering rebuild...")
+			select {
+			case c.buildTrigger <- struct{}{}:
+			default:
+				// Already triggered
+			}
+		} else if line != "" {
+			c.log("info", "Unknown command: %s. Type 'rebuild' or 'r' to trigger rebuild", line)
+		}
+	}
+
+	// If scanner encounters an error (like stdin closed), just return
+	if err := scanner.Err(); err != nil {
+		// Don't log error if context is cancelled (normal shutdown)
+		select {
+		case <-c.ctx.Done():
+			return
+		default:
+			c.log("warn", "Error reading command input: %v", err)
+		}
+	}
+}
+
+// handleRebuildSignal listens for SIGHUP signal or file-based trigger to rebuild
+func (c *Coordinator) handleRebuildSignal() {
+	// Listen for SIGHUP signal (Unix systems)
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGHUP)
+
+	// Also check for file-based trigger (cross-platform)
+	rebuildFile := filepath.Join(c.cfg.Root, ".goswap-rebuild")
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	var lastModTime time.Time
+
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-sigChan:
+			// SIGHUP received, trigger rebuild
+			c.log("info", "Rebuild signal received, triggering rebuild...")
+			select {
+			case c.buildTrigger <- struct{}{}:
+			default:
+				// Already triggered
+			}
+		case <-ticker.C:
+			// Check if rebuild trigger file exists or was modified
+			info, err := os.Stat(rebuildFile)
+			if err == nil {
+				modTime := info.ModTime()
+				if !modTime.Equal(lastModTime) {
+					lastModTime = modTime
+					c.log("info", "Rebuild trigger file detected, triggering rebuild...")
+					// Remove the file after reading
+					os.Remove(rebuildFile)
+					select {
+					case c.buildTrigger <- struct{}{}:
+					default:
+						// Already triggered
+					}
+				}
+			} else if !os.IsNotExist(err) {
+				// Reset lastModTime if file was deleted
+				lastModTime = time.Time{}
+			}
+		}
+	}
+}
+
 // waitForShutdown waits for interrupt signal and performs graceful shutdown
 func (c *Coordinator) waitForShutdown() {
 	quit := make(chan os.Signal, 1)
@@ -262,6 +353,9 @@ func (c *Coordinator) waitForShutdown() {
 
 	// Cancel context to stop all components
 	c.cancel()
+
+	// Stop watcher
+	c.watcher.Stop()
 
 	// Stop current process
 	if proc := c.procMgr.Current(); proc != nil {

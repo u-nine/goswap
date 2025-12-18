@@ -6,7 +6,7 @@ bin = './tmp/main.exe'
 delay = 500
 
 [process]
-start_port = 55700
+start_port = 53700
 
 [proxy]
 port = 8099
