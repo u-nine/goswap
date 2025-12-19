@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -60,11 +61,22 @@ func (p *Proxy) SetUpstream(host string, port int) error {
 
 	// Custom error handler
 	p.proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		// Ignore connection closed errors during service switching (expected behavior)
+		errStr := err.Error()
+		if strings.Contains(errStr, "connection was forcibly closed") ||
+			strings.Contains(errStr, "connection reset by peer") ||
+			strings.Contains(errStr, "broken pipe") ||
+			strings.Contains(errStr, "EOF") {
+			// This is expected when switching services - don't log as error
+			http.Error(w, "Service temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		// Log other errors
 		p.log("error", "Proxy error: %v", err)
 		http.Error(w, "Service temporarily unavailable", http.StatusServiceUnavailable)
 	}
 
-	// Custom transport with reasonable timeouts
+	// Custom transport with reasonable timeouts and better connection handling
 	p.proxy.Transport = &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
@@ -74,6 +86,8 @@ func (p *Proxy) SetUpstream(host string, port int) error {
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
+		DisableKeepAlives:     false, // Keep connections alive for better performance
+		ResponseHeaderTimeout: 30 * time.Second,
 	}
 
 	p.log("info", "Upstream set to %s", upstream.String())

@@ -250,8 +250,9 @@ func (c *Coordinator) rebuild() {
 	// Gracefully stop old process
 	if oldProc != nil {
 		go func() {
-			// Wait a bit for in-flight requests to complete
-			time.Sleep(2 * time.Second)
+			// Wait for in-flight requests to complete before stopping old process
+			// Increased wait time to allow long-running requests to finish
+			time.Sleep(5 * time.Second)
 			c.procMgr.Stop(oldProc, 10*time.Second)
 
 			// Clean up all old binaries except the current one
