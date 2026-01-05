@@ -73,7 +73,7 @@ func (c *Coordinator) Run() error {
 	c.procMgr.SetCurrent(proc)
 
 	// Set proxy upstream
-	if err := c.proxy.SetUpstream("127.0.0.1", proc.Port); err != nil {
+	if _, err := c.proxy.SetUpstream("127.0.0.1", proc.Port); err != nil {
 		return fmt.Errorf("failed to set proxy upstream: %w", err)
 	}
 
@@ -237,7 +237,8 @@ func (c *Coordinator) rebuild() {
 	oldProc := c.procMgr.Current()
 
 	// Switch proxy to new process
-	if err := c.proxy.SetUpstream("127.0.0.1", newProc.Port); err != nil {
+	waitOld, err := c.proxy.SetUpstream("127.0.0.1", newProc.Port)
+	if err != nil {
 		c.log("error", "Failed to switch upstream: %v", err)
 		// Stop the new process since we couldn't switch
 		c.procMgr.Stop(newProc, 5*time.Second)
@@ -251,8 +252,24 @@ func (c *Coordinator) rebuild() {
 	if oldProc != nil {
 		go func() {
 			// Wait for in-flight requests to complete before stopping old process
-			// Increased wait time to allow long-running requests to finish
-			time.Sleep(5 * time.Second)
+			// We wait for the old proxy backend to finish all pending requests
+			c.log("info", "Waiting for old process requests to complete...")
+			
+			done := make(chan struct{})
+			go func() {
+				if waitOld != nil {
+					waitOld()
+				}
+				close(done)
+			}()
+
+			select {
+			case <-done:
+				c.log("info", "All requests to old process finished")
+			case <-time.After(30 * time.Second):
+				c.log("warn", "Timeout waiting for old process requests, forcing shutdown")
+			}
+
 			c.procMgr.Stop(oldProc, 10*time.Second)
 
 			// Clean up all old binaries except the current one

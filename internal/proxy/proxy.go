@@ -3,10 +3,12 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,15 +17,21 @@ import (
 	"github.com/fatih/color"
 )
 
+// Backend represents an upstream server and tracks its active requests
+type Backend struct {
+	target *url.URL
+	proxy  *httputil.ReverseProxy
+	wg     sync.WaitGroup
+}
+
 // Proxy is a reverse proxy server that can switch backends dynamically
 type Proxy struct {
 	port     int
 	colorful bool
 
-	mu       sync.RWMutex
-	upstream *url.URL
-	proxy    *httputil.ReverseProxy
-	server   *http.Server
+	mu      sync.RWMutex
+	backend *Backend
+	server  *http.Server
 
 	// Stats
 	requestCount uint64
@@ -39,28 +47,29 @@ func New(port int, colorful bool) *Proxy {
 	return p
 }
 
-// SetUpstream changes the upstream server
-func (p *Proxy) SetUpstream(host string, port int) error {
+// SetUpstream changes the upstream server and returns a wait function
+// to wait for the old upstream to finish processing requests
+func (p *Proxy) SetUpstream(host string, port int) (func(), error) {
 	upstream, err := url.Parse(fmt.Sprintf("http://%s:%d", host, port))
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	p.upstream = upstream
-	p.proxy = httputil.NewSingleHostReverseProxy(upstream)
+	newBackend := &Backend{
+		target: upstream,
+		proxy:  httputil.NewSingleHostReverseProxy(upstream),
+	}
+	newBackend.proxy.ErrorLog = log.New(&logFilter{}, "", log.LstdFlags)
 
 	// Customize the director
-	originalDirector := p.proxy.Director
-	p.proxy.Director = func(req *http.Request) {
+	originalDirector := newBackend.proxy.Director
+	newBackend.proxy.Director = func(req *http.Request) {
 		originalDirector(req)
 		req.Host = upstream.Host
 	}
 
 	// Custom error handler
-	p.proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+	newBackend.proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		// Ignore connection closed errors during service switching (expected behavior)
 		errStr := err.Error()
 		if strings.Contains(errStr, "connection was forcibly closed") ||
@@ -77,7 +86,7 @@ func (p *Proxy) SetUpstream(host string, port int) error {
 	}
 
 	// Custom transport with reasonable timeouts and better connection handling
-	p.proxy.Transport = &http.Transport{
+	newBackend.proxy.Transport = &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
@@ -90,8 +99,19 @@ func (p *Proxy) SetUpstream(host string, port int) error {
 		ResponseHeaderTimeout: 30 * time.Second,
 	}
 
+	p.mu.Lock()
+	oldBackend := p.backend
+	p.backend = newBackend
+	p.mu.Unlock()
+
 	p.log("info", "Upstream set to %s", upstream.String())
-	return nil
+
+	// Return a function that waits for the old backend to finish
+	return func() {
+		if oldBackend != nil {
+			oldBackend.wg.Wait()
+		}
+	}, nil
 }
 
 // Start starts the proxy server
@@ -136,15 +156,19 @@ func (p *Proxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 	atomic.AddUint64(&p.requestCount, 1)
 
 	p.mu.RLock()
-	proxy := p.proxy
+	backend := p.backend
 	p.mu.RUnlock()
 
-	if proxy == nil {
+	if backend == nil {
 		http.Error(w, "No upstream server available", http.StatusServiceUnavailable)
 		return
 	}
 
-	proxy.ServeHTTP(w, r)
+	// Track active request on this backend
+	backend.wg.Add(1)
+	defer backend.wg.Done()
+
+	backend.proxy.ServeHTTP(w, r)
 }
 
 // RequestCount returns the total number of requests handled
@@ -156,7 +180,7 @@ func (p *Proxy) RequestCount() uint64 {
 func (p *Proxy) HasUpstream() bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.upstream != nil
+	return p.backend != nil
 }
 
 // log prints a formatted log message
@@ -178,4 +202,15 @@ func (p *Proxy) log(level, format string, args ...interface{}) {
 	} else {
 		fmt.Printf("[%s] [PROXY] %s\n", timestamp, msg)
 	}
+}
+
+// logFilter filters out expected errors
+type logFilter struct{}
+
+func (w *logFilter) Write(p []byte) (n int, err error) {
+	msg := string(p)
+	if strings.Contains(msg, "read error during body copy: unexpected EOF") {
+		return len(p), nil
+	}
+	return os.Stderr.Write(p)
 }
